@@ -1,0 +1,37 @@
+{
+  "name": "home-hub-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Home Hub backend service",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:dev": "node --watch -r ts-node/register src/main.ts",
+    "check": "tsc --noEmit",
+    "db:migrate": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
+    "db:revert": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:revert"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.1.0",
+    "@nestjs/config": "^12.0.1",
+    "@nestjs/core": "^12.1.0",
+    "@nestjs/jwt": "^12.0.2",
+    "@nestjs/platform-express": "^12.1.0",
+    "@nestjs/swagger": "^12.0.2",
+    "@nestjs/typeorm": "^12.0.1",
+    "argon2": "^0.45.1",
+    "better-sqlite3": "^12.11.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typeorm": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

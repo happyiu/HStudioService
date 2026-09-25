@@ -1,0 +1,8 @@
+allowBuilds:
+  '@scarf/scarf': false
+  argon2: true
+  better-sqlite3: true
+minimumReleaseAgeExclude:
+  - '@nestjs/common@12.1.0'
+  - '@nestjs/core@12.1.0'
+  - '@nestjs/platform-express@12.1.0'
