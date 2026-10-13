@@ -9,10 +9,14 @@
     "start": "node dist/main.js",
     "start:dev": "node --watch -r ts-node/register src/main.ts",
     "check": "tsc --noEmit",
+    "test": "node --test -r ts-node/register src/ghome/ghome.service.test.ts src/ghome-world/*.test.ts",
     "db:migrate": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
     "db:revert": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:revert"
   },
   "dependencies": {
+    "@colyseus/core": "0.18.18",
+    "@colyseus/schema": "5.0.39",
+    "@colyseus/ws-transport": "0.18.4",
     "@nestjs/common": "^12.1.0",
     "@nestjs/config": "^12.0.1",
     "@nestjs/core": "^12.1.0",
@@ -29,6 +33,7 @@
     "typeorm": "^1.1.1"
   },
   "devDependencies": {
+    "@colyseus/sdk": "0.18.5",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.2",
     "ts-node": "^10.9.2",

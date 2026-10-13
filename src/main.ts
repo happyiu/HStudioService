@@ -4,13 +4,18 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { GhomeWorldGateway } from './ghome-world/ghome-world.gateway';
+
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/http-exception.filter';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
 
-  app.enableCors();
+  app.useBodyParser('json', { limit: '2mb' });
+  app.enableShutdownHooks();
+  app.enableCors({ origin: true });
 
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(new ValidationPipe({
@@ -31,7 +36,8 @@ async function bootstrap(): Promise<void> {
 
   const host = process.env.HOST || '0.0.0.0';
   const port = Number(process.env.PORT || 3000);
-  await app.listen(port, host);
+  await app.init();
+  await app.get(GhomeWorldGateway).start(app.getHttpServer(), port, host);
 }
 
 void bootstrap();

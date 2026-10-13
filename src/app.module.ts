@@ -1,3 +1,5 @@
+import { GhomeWorldModule } from './ghome-world/ghome-world.module';
+import { GhomeWorld, GhomeCommandReceipt } from './database/entities/ghome-world.entity';
 import { join } from 'node:path';
 
 import { Module } from '@nestjs/common';
@@ -12,6 +14,7 @@ import { AuthSession } from './database/entities/auth-session.entity';
 import { Site } from './database/entities/site.entity';
 import { User } from './database/entities/user.entity';
 import { DevicesModule } from './devices/devices.module';
+import { GhomeModule } from './ghome/ghome.module';
 import { LuckyModule } from './lucky/lucky.module';
 import { PveModule } from './pve/pve.module';
 
@@ -24,7 +27,7 @@ import { PveModule } from './pve/pve.module';
       useFactory: (config: ConfigService) => ({
         type: 'better-sqlite3' as const,
         database: resolveDatabasePath(config.get<string>('DB_PATH')),
-        entities: [User, AuthSession, Device, Site],
+        entities: [User, AuthSession, Device, Site, GhomeWorld, GhomeCommandReceipt],
         migrations: [join(__dirname, 'database/migrations/*{.js,.ts}')],
         migrationsRun: true,
         synchronize: false,
@@ -32,6 +35,8 @@ import { PveModule } from './pve/pve.module';
     }),
     AuthModule,
     DevicesModule,
+    GhomeModule,
+    GhomeWorldModule,
     LuckyModule,
     PveModule,
   ],

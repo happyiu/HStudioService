@@ -13,13 +13,16 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const context = host.switchToHttp();
     const response = context.getResponse<Response>();
     const request = context.getRequest<Request>();
+    const parserType = (exception as { type?: string } | null)?.type;
+    const parserStatus = parserType === 'entity.too.large' ? HttpStatus.PAYLOAD_TOO_LARGE
+      : parserType === 'entity.parse.failed' ? HttpStatus.BAD_REQUEST : undefined;
     const status = exception instanceof HttpException
       ? exception.getStatus()
-      : HttpStatus.INTERNAL_SERVER_ERROR;
+      : parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR;
     const details = exception instanceof HttpException ? exception.getResponse() : undefined;
     const message = typeof details === 'string' || Array.isArray(details)
       ? details
-      : (details as { message?: string | string[] } | undefined)?.message || 'Internal server error';
+      : (details as { message?: string | string[] } | undefined)?.message || (parserType === 'entity.too.large' ? '请求体超过 2 MiB' : parserType === 'entity.parse.failed' ? 'JSON 格式无效' : 'Internal server error');
 
     response.status(status).json({
       statusCode: status,

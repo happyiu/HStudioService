@@ -13,6 +13,8 @@
     "skipLibCheck": true,
     "strict": true,
     "strictPropertyInitialization": false,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "allowJs": true,
+    "resolveJsonModule": true
   }
 }
