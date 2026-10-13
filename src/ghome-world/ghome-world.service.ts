@@ -3,8 +3,9 @@ import { EventEmitter } from 'node:events';
 import { BadRequestException, ConflictException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
+import { GhomePlayer, GhomeWorldCreation, GhomeSaveArchive } from '../database/entities/ghome-player.entity';
 import { GhomeWorld, GhomeCommandReceipt } from '../database/entities/ghome-world.entity';
-import WorldModel, { validateSnapshot, objectCells, TILE, MAP_COLUMNS, MAP_ROWS } from './core/build/WorldModel.js';
+import WorldModel, { validateSnapshot, objectCells, DEFINITIONS, TILE, MAP_COLUMNS, MAP_ROWS } from './core/build/WorldModel.js';
 import { getTimeState, WEATHER } from './core/environment.js';
 import catalog from './core/catalog.json';
 import defaultIsland from './core/default-island.json';
@@ -45,6 +46,7 @@ export class GhomeWorldService {
   private tail: Promise<unknown> = Promise.resolve();
   private models = new WeakMap<WorldMap, WorldModel>();
   private loaded = new Map<string, Loaded>();
+  private initializing = new Set<string>();
   constructor(private readonly db: DataSource, private readonly config: ConfigService) {}
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -85,6 +87,7 @@ export class GhomeWorldService {
         seasonOverride: runtime.seasonOverride, weatherOverride: runtime.weatherOverride },
       player: clone(runtime.player), appearance: clone(runtime.appearance), creatures: clone(runtime.creatures),
       seeds: runtime.seeds, vegetables: runtime.vegetables,
+      ...(runtime.identity ? { identity: clone(runtime.identity) } : {}), ...(runtime.tutorial ? { tutorial: clone(runtime.tutorial) } : {}),
       crops: runtime.crops.map(crop => ({ ...crop, stage: cropStage(crop.plantedAt, now) })) };
   }
   private snapshot(world: Loaded) {
@@ -95,7 +98,162 @@ export class GhomeWorldService {
   read(ownerId: string) { return this.serial(async () => this.snapshot(await this.load(ownerId))); }
   state(ownerId: string) { return this.serial(async () => this.runtimeView(await this.load(ownerId))); }
 
-  bootstrap(ownerId: string, value: unknown) {
+  private name(value: unknown, label: string) {
+    if (typeof value !== 'string') fail(`${label}不能为空`);
+    const text = value.trim();
+    if (Array.from(text).length < 1 || Array.from(text).length > 12 || /[\u0000-\u001f\u007f<>]/u.test(text)) fail(`${label}请使用 1–12 个文字，不含特殊符号`);
+    return text;
+  }
+  async entry(ownerId: string) {
+    const result = await this.serial(async () => {
+      let player = await this.db.getRepository(GhomePlayer).findOneBy({ ownerId });
+      const creation = await this.db.getRepository(GhomeWorldCreation).findOneBy({ ownerId });
+      const existing = await this.db.getRepository(GhomeWorld).findOneBy({ ownerId });
+      // Existing islands acquire an identity without modifying any saved world data.
+      if (!player && existing) {
+        const runtime: WorldRuntime = JSON.parse(existing.runtimeJson);
+        player = await this.db.getRepository(GhomePlayer).save({ ownerId, id: randomUUID(), nickname: '岛屿主人',
+          appearanceJson: JSON.stringify(runtime.appearance), createdAt: this.now() });
+      }
+      return { player: player ? { id: player.id, nickname: player.nickname, appearance: JSON.parse(player.appearanceJson) } : null,
+        world: creation || (existing ? { worldId: existing.id, name: '芽芽岛', templateId: 'existing', templateVersion: 1,
+          status: 'READY' as const, completed: 3, error: '' } : null) };
+    });
+    if (result.world?.status === 'INITIALIZING') this.resumeCreation(ownerId);
+    return result;
+  }
+  createPlayer(ownerId: string, value: unknown) {
+    return this.serial(async () => {
+      const input = object(value); only(input, ['nickname', 'appearance']);
+      const nickname = this.name(input.nickname, '角色昵称'); const appearance = validateAppearance(input.appearance);
+      const repository = this.db.getRepository(GhomePlayer);
+      const existing = await repository.findOneBy({ ownerId });
+      if (existing) return { id: existing.id, nickname: existing.nickname, appearance: JSON.parse(existing.appearanceJson) };
+      const player = await repository.save({ ownerId, id: randomUUID(), nickname, appearanceJson: JSON.stringify(appearance), createdAt: this.now() });
+      return { id: player.id, nickname, appearance };
+    });
+  }
+  updatePlayer(ownerId: string, value: unknown) {
+    return this.serial(async () => {
+      const input = object(value); only(input, ['nickname', 'appearance']);
+      const nickname = this.name(input.nickname, '角色昵称'); const appearance = validateAppearance(input.appearance);
+      const repository = this.db.getRepository(GhomePlayer); const player = await repository.findOneBy({ ownerId });
+      if (!player) throw new NotFoundException('角色尚未创建');
+      if (await this.db.getRepository(GhomeWorldCreation).findOneBy({ ownerId }) || await this.db.getRepository(GhomeWorld).findOneBy({ ownerId }))
+        throw new ConflictException('小岛已开始创建，不能返回修改初始角色');
+      await repository.update(ownerId, { nickname, appearanceJson: JSON.stringify(appearance) });
+      return { id: player.id, nickname, appearance };
+    });
+  }
+  async saves(ownerId: string) {
+    await this.entry(ownerId);
+    return this.serial(async () => {
+      const player = await this.db.getRepository(GhomePlayer).findOneBy({ ownerId });
+      const creation = await this.db.getRepository(GhomeWorldCreation).findOneBy({ ownerId });
+      const world = await this.db.getRepository(GhomeWorld).findOneBy({ ownerId });
+      const runtime = world ? (await this.load(ownerId)).runtime : null;
+      const archive = await this.db.getRepository(GhomeSaveArchive).findOne({ where: { ownerId }, order: { deletedAt: 'DESC' } });
+      return { saves: player ? [{ id: player.id, nickname: player.nickname, appearance: JSON.parse(player.appearanceJson),
+        createdAt: player.createdAt, updatedAt: runtime?.lastObservedAt ?? creation?.createdAt ?? player.createdAt,
+        world: creation ? { worldId: creation.worldId, name: creation.name, status: creation.status }
+          : world ? { worldId: world.id, name: runtime?.identity?.worldName || '芽芽岛', status: 'READY' } : null }] : [],
+        deleted: !player && archive ? { id: archive.id, nickname: archive.nickname, deletedAt: archive.deletedAt } : null };
+    });
+  }
+  deleteSave(ownerId: string, playerId: string) {
+    return this.serial(async () => {
+      const player = await this.db.getRepository(GhomePlayer).findOneBy({ ownerId, id: playerId });
+      if (!player) throw new NotFoundException('该角色存档不存在，请刷新列表');
+      const creation = await this.db.getRepository(GhomeWorldCreation).findOneBy({ ownerId });
+      if (creation?.status === 'INITIALIZING' || this.initializing.has(ownerId)) throw new ConflictException('小岛正在初始化，请完成后再删除');
+      const row = await this.db.getRepository(GhomeWorld).findOneBy({ ownerId });
+      if (row) {
+        const world = await this.load(ownerId); this.time(world);
+        row.runtimeJson = JSON.stringify(world.runtime);
+      }
+      const receipts = row ? await this.db.getRepository(GhomeCommandReceipt).findBy({ worldId: row.id }) : [];
+      const archive = { id: randomUUID(), ownerId, nickname: player.nickname, deletedAt: this.now(),
+        snapshotJson: JSON.stringify({ player, creation, world: row, receipts }) };
+      await this.db.transaction(async manager => {
+        await manager.getRepository(GhomeSaveArchive).insert(archive);
+        if (row) { await manager.getRepository(GhomeCommandReceipt).delete({ worldId: row.id }); await manager.getRepository(GhomeWorld).delete({ ownerId }); }
+        await manager.getRepository(GhomeWorldCreation).delete({ ownerId });
+        await manager.getRepository(GhomePlayer).delete({ ownerId });
+      });
+      this.loaded.delete(ownerId); this.updates.emit(`${ownerId}:deleted`);
+      return { archiveId: archive.id };
+    });
+  }
+  restoreSave(ownerId: string, archiveId: string) {
+    return this.serial(async () => {
+      const archive = await this.db.getRepository(GhomeSaveArchive).findOneBy({ ownerId, id: archiveId });
+      if (!archive) throw new NotFoundException('可恢复的存档不存在');
+      if (await this.db.getRepository(GhomePlayer).findOneBy({ ownerId }) || await this.db.getRepository(GhomeWorld).findOneBy({ ownerId }))
+        throw new ConflictException('已有角色存档，无法覆盖恢复');
+      const saved = JSON.parse(archive.snapshotJson);
+      await this.db.transaction(async manager => {
+        await manager.getRepository(GhomePlayer).insert(saved.player);
+        if (saved.creation) await manager.getRepository(GhomeWorldCreation).insert(saved.creation);
+        if (saved.world) await manager.getRepository(GhomeWorld).insert(saved.world);
+        if (saved.receipts.length) await manager.getRepository(GhomeCommandReceipt).insert(saved.receipts);
+        await manager.getRepository(GhomeSaveArchive).delete({ ownerId, id: archiveId });
+      });
+      this.loaded.delete(ownerId);
+      return { ok: true };
+    });
+  }
+
+  async createWorld(ownerId: string, value: unknown) {
+    const creation = await this.serial(async () => {
+      const input = object(value); only(input, ['name', 'templateId']);
+      const name = this.name(input.name, '小岛名称');
+      if (input.templateId !== 'sprout_island') fail('该岛屿风格尚未开放');
+      if (!await this.db.getRepository(GhomePlayer).findOneBy({ ownerId })) fail('请先创建角色');
+      const repository = this.db.getRepository(GhomeWorldCreation);
+      const existing = await repository.findOneBy({ ownerId });
+      if (existing) return existing;
+      if (await this.db.getRepository(GhomeWorld).findOneBy({ ownerId })) throw new ConflictException('已有世界，请返回入口加载存档');
+      return repository.save({ ownerId, worldId: randomUUID(), name, templateId: 'sprout_island', templateVersion: 1,
+        status: 'INITIALIZING' as const, completed: 0, error: '', createdAt: this.now() });
+    });
+    if (creation.status === 'INITIALIZING') this.resumeCreation(ownerId);
+    return creation;
+  }
+  async retryCreation(ownerId: string) {
+    await this.serial(async () => {
+      const repository = this.db.getRepository(GhomeWorldCreation);
+      const row = await repository.findOneBy({ ownerId });
+      if (!row) throw new NotFoundException('尚未创建小岛');
+      if (row.status === 'FAILED') await repository.update(ownerId, { status: 'INITIALIZING', error: '' });
+    });
+    return this.entry(ownerId);
+  }
+  private resumeCreation(ownerId: string) {
+    if (this.initializing.has(ownerId)) return;
+    this.initializing.add(ownerId);
+    // Each completed task is persisted; reading the entry resumes after process shutdown.
+    setImmediate(() => { void this.initializeCreation(ownerId).finally(() => this.initializing.delete(ownerId)); });
+  }
+  private async initializeCreation(ownerId: string) {
+    const repository = this.db.getRepository(GhomeWorldCreation);
+    try {
+      const creation = await repository.findOneBy({ ownerId });
+      const player = await this.db.getRepository(GhomePlayer).findOneBy({ ownerId });
+      if (!creation || creation.status !== 'INITIALIZING' || !player) return;
+      if (creation.templateId !== 'sprout_island' || creation.templateVersion !== 1) fail('地图模板版本不支持');
+      validateSnapshot(clone(defaultIsland)); validateAppearance(JSON.parse(player.appearanceJson));
+      await repository.update(ownerId, { completed: Math.max(creation.completed, 1) });
+      await this.bootstrap(ownerId, { appearance: JSON.parse(player.appearanceJson) }, { creation, player });
+      await repository.update(ownerId, { completed: 2 });
+      await this.read(ownerId);
+      await repository.update(ownerId, { completed: 3, status: 'READY', error: '' });
+    } catch (error) {
+      try { await repository.update(ownerId, { status: 'FAILED', error: error instanceof HttpException ? error.message : '小岛初始化暂时失败，请重试' }); }
+      catch { /* The persisted INITIALIZING record can resume when storage recovers. */ }
+    }
+  }
+
+  bootstrap(ownerId: string, value: unknown, journey?: { creation: GhomeWorldCreation; player: GhomePlayer }) {
     return this.serial(async () => {
       const existing = await this.db.getRepository(GhomeWorld).findOneBy({ ownerId });
       if (existing) return this.snapshot(await this.load(ownerId));
@@ -111,9 +269,16 @@ export class GhomeWorldService {
         crops: map.crops.filter(crop => crop.stage >= 0).map(crop => ({ column: crop.column, row: crop.row,
           plantedAt: now - crop.stage * STAGE_MS, matureAt: now + GROWTH_MS - crop.stage * STAGE_MS })) };
       map.crops.forEach(crop => { crop.stage = -1; });
-      const row = Object.assign(new GhomeWorld(), { id: randomUUID(), ownerId, schemaVersion: 1, mapRevision: 1, mapJson: JSON.stringify(map), runtimeJson: JSON.stringify(runtime) });
+      const row = Object.assign(new GhomeWorld(), { id: journey?.creation.worldId ?? randomUUID(), ownerId, schemaVersion: 1, mapRevision: 1, mapJson: JSON.stringify(map), runtimeJson: JSON.stringify(runtime) });
       const world: Loaded = { row, map, runtime, movedAt: now, movementBudget: 16, dirty: false };
       this.relocate(world);
+      if (journey) {
+        runtime.identity = { playerId: journey.player.id, nickname: journey.player.nickname, worldName: journey.creation.name };
+        const gift = [{ x: runtime.player.x + 32, y: runtime.player.y }, { x: runtime.player.x - 32, y: runtime.player.y },
+          { x: runtime.player.x, y: runtime.player.y + 32 }, { x: runtime.player.x, y: runtime.player.y - 32 }]
+          .find(position => this.safe(map, { ...position, facing: 'down' })) || runtime.player;
+        runtime.tutorial = { step: 'arrival', start: clone(runtime.player), gift: { ...gift, facing: 'down' } };
+      }
       row.runtimeJson = JSON.stringify(runtime);
       await this.db.getRepository(GhomeWorld).insert(row);
       this.loaded.set(ownerId, world);
@@ -162,6 +327,9 @@ export class GhomeWorldService {
       }
       world.movementBudget = allowance - distance;
       world.runtime.player = clone(position); world.movedAt = now; world.dirty = true;
+      if (world.runtime.tutorial?.step === 'move' && Math.hypot(position.x - world.runtime.tutorial.start.x, position.y - world.runtime.tutorial.start.y) >= 16) {
+        world.runtime.tutorial.step = 'gift'; await this.persist(world);
+      }
       this.updates.emit(ownerId);
       return this.runtimeView(world);
     });
@@ -209,7 +377,7 @@ export class GhomeWorldService {
     return this.serial(async () => {
       const input = object(value); only(input, ['commandId', 'type', 'payload']);
       if (typeof input.commandId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(input.commandId)) fail('操作编号无效');
-      if (!['plant', 'harvest', 'appearance', 'environment', 'map'].includes(input.type)) fail('未知操作');
+      if (!['plant', 'harvest', 'appearance', 'environment', 'map', 'arrival', 'starter-gift'].includes(input.type)) fail('未知操作');
       const command = input as Command; const payload = object(input.payload ?? {});
       const current = await this.load(ownerId);
       const digest = createHash('sha256').update(canonical(command)).digest('hex');
@@ -240,6 +408,16 @@ export class GhomeWorldService {
           next.runtime.crops = next.runtime.crops.filter(entry => entry !== crop);
           next.runtime.vegetables++; next.runtime.seeds++;
         }
+      } else if (command.type === 'arrival' || command.type === 'starter-gift') {
+        only(payload, []);
+        const tutorial = next.runtime.tutorial;
+        if (!tutorial) fail('没有待完成的新手任务');
+        if (command.type === 'arrival') {
+          if (tutorial.step === 'arrival') tutorial.step = 'move';
+        } else if (tutorial.step === 'gift') {
+          if (Math.hypot(next.runtime.player.x - tutorial.gift.x, next.runtime.player.y - tutorial.gift.y) >= 34) fail('请靠近新手礼物');
+          next.runtime.seeds += 5; tutorial.step = 'build';
+        } else if (tutorial.step !== 'build' && tutorial.step !== 'done') fail('请先试着移动');
       } else if (command.type === 'appearance') {
         next.runtime.appearance = validateAppearance(payload);
       } else if (command.type === 'environment') {
@@ -275,12 +453,17 @@ export class GhomeWorldService {
             || canonical(map.cells[crop.row][crop.column]) !== canonical(next.map.cells[crop.row][crop.column])
             || canonical(structures(map)) !== canonical(structures(next.map))) fail('请先收获已有作物再改造农田');
         }
+        if (next.runtime.tutorial?.step === 'build' && map.objects.some(entry =>
+          !next.map.objects.some(previous => previous.id === entry.id) && ['building', 'decoration'].includes(DEFINITIONS[entry.type]?.category ?? ''))) {
+          next.runtime.tutorial.step = 'done';
+        }
         next.map = map; this.relocate(next); next.row.mapRevision++;
       }
       next.row.mapJson = JSON.stringify(next.map); next.row.runtimeJson = JSON.stringify(next.runtime); next.dirty = false;
       const result = { commandId: command.commandId, ok: true, session: this.runtimeView(next) };
       await this.db.transaction(async (manager: EntityManager) => {
         await manager.getRepository(GhomeWorld).save(next.row);
+        if (command.type === 'appearance') await manager.getRepository(GhomePlayer).update(ownerId, { appearanceJson: JSON.stringify(next.runtime.appearance) });
         await manager.getRepository(GhomeCommandReceipt).insert({ worldId: next.row.id, commandId: command.commandId, digest, resultJson: JSON.stringify(result) });
       });
       this.loaded.set(ownerId, next); this.updates.emit(ownerId);

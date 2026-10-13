@@ -1,3 +1,4 @@
+import { GhomePlayer, GhomeWorldCreation, GhomeSaveArchive } from './database/entities/ghome-player.entity';
 import { GhomeWorldModule } from './ghome-world/ghome-world.module';
 import { GhomeWorld, GhomeCommandReceipt } from './database/entities/ghome-world.entity';
 import { join } from 'node:path';
@@ -27,7 +28,7 @@ import { PveModule } from './pve/pve.module';
       useFactory: (config: ConfigService) => ({
         type: 'better-sqlite3' as const,
         database: resolveDatabasePath(config.get<string>('DB_PATH')),
-        entities: [User, AuthSession, Device, Site, GhomeWorld, GhomeCommandReceipt],
+        entities: [User, AuthSession, Device, Site, GhomeWorld, GhomeCommandReceipt, GhomePlayer, GhomeWorldCreation, GhomeSaveArchive],
         migrations: [join(__dirname, 'database/migrations/*{.js,.ts}')],
         migrationsRun: true,
         synchronize: false,

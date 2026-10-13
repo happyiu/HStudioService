@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsInt, IsObject, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -11,6 +11,15 @@ class BootstrapDto {
   @IsOptional() @IsObject() snapshot?: Record<string, unknown>;
   @IsOptional() @IsObject() appearance?: Record<string, string>;
 }
+class CreatePlayerDto {
+  @IsString() @MaxLength(24) nickname!: string;
+  @IsObject() appearance!: Record<string, string>;
+}
+class CreateWorldDto {
+  @IsString() @MaxLength(24) name!: string;
+  @IsString() @MaxLength(40) templateId!: string;
+}
+class ArrivalDto { @IsString() @MaxLength(80) commandId!: string; }
 class SaveMapDto {
   @IsString() @MaxLength(80) commandId!: string;
   @IsInt() @Min(1) baseMapRevision!: number;
@@ -22,6 +31,26 @@ class SaveMapDto {
 @Controller('ghome/world')
 export class GhomeWorldController {
   constructor(private readonly worlds: GhomeWorldService, private readonly gateway: GhomeWorldGateway) {}
+  @Get('entry')
+  entry(@CurrentUser() user: AuthenticatedUser) { return this.worlds.entry(user.id); }
+  @Post('player') @HttpCode(200)
+  player(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreatePlayerDto) { return this.worlds.createPlayer(user.id, dto); }
+  @Patch('player')
+  updatePlayer(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreatePlayerDto) { return this.worlds.updatePlayer(user.id, dto); }
+  @Get('saves')
+  saves(@CurrentUser() user: AuthenticatedUser) { return this.worlds.saves(user.id); }
+  @Delete('saves/:playerId')
+  deleteSave(@CurrentUser() user: AuthenticatedUser, @Param('playerId') playerId: string) { return this.worlds.deleteSave(user.id, playerId); }
+  @Post('saves/:archiveId/restore') @HttpCode(200)
+  restoreSave(@CurrentUser() user: AuthenticatedUser, @Param('archiveId') archiveId: string) { return this.worlds.restoreSave(user.id, archiveId); }
+  @Post('create') @HttpCode(200)
+  create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateWorldDto) { return this.worlds.createWorld(user.id, dto); }
+  @Post('retry') @HttpCode(200)
+  retry(@CurrentUser() user: AuthenticatedUser) { return this.worlds.retryCreation(user.id); }
+  @Post('arrival') @HttpCode(200)
+  arrival(@CurrentUser() user: AuthenticatedUser, @Body() dto: ArrivalDto) {
+    return this.worlds.command(user.id, { commandId: dto.commandId, type: 'arrival', payload: {} });
+  }
   @Get()
   @ApiOperation({ summary: '读取个人岛屿，未创建时返回 404' })
   read(@CurrentUser() user: AuthenticatedUser) { return this.worlds.read(user.id); }

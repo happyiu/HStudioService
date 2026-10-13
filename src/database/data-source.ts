@@ -1,3 +1,4 @@
+import { GhomePlayer, GhomeWorldCreation, GhomeSaveArchive } from './entities/ghome-player.entity';
 import { GhomeWorld, GhomeCommandReceipt } from './entities/ghome-world.entity';
 import 'reflect-metadata';
 
@@ -13,6 +14,6 @@ import { User } from './entities/user.entity';
 export default new DataSource({
   type: 'better-sqlite3',
   database: resolveDatabasePath(),
-  entities: [User, AuthSession, Device, Site, GhomeWorld, GhomeCommandReceipt],
+  entities: [User, AuthSession, Device, Site, GhomeWorld, GhomeCommandReceipt, GhomePlayer, GhomeWorldCreation, GhomeSaveArchive],
   migrations: [join(__dirname, 'migrations/*{.js,.ts}')],
 });

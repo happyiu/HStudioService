@@ -14,5 +14,7 @@ export interface WorldRuntime {
   seasonOverride: number | null; weatherOverride: string | null;
   player: Position; appearance: Record<string, string>; creatures: Creature[];
   seeds: number; vegetables: number; crops: Crop[];
+  identity?: { playerId: string; nickname: string; worldName: string };
+  tutorial?: { step: 'arrival' | 'move' | 'gift' | 'build' | 'done'; start: Position; gift: Position };
 }
 export interface Command { commandId: string; type: string; payload?: Record<string, any> }

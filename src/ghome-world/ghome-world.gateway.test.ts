@@ -96,6 +96,15 @@ test('real Nest HTTP and Colyseus seats restore after drops, empty-room disposal
     assert.equal(snapshot.body.mapRevision, 2); assert.equal(JSON.parse(room.state.session).crops[0].stage, 3);
     const harvested = await message(room, { commandId: 'network-harvest', type: 'harvest', payload: { column: 10, row: 10 } });
     assert.equal(harvested.session.vegetables, 1); assert.equal(harvested.session.seeds, 20);
+    const saves = await http('/saves'); assert.equal(saves.status, 200); assert.equal(saves.body.saves.length, 1);
+    const deletedSocket = new Promise<number>(resolve => room.onLeave.once(resolve));
+    const deletion = await fetch(`${endpoint}/api/v1/ghome/world/saves/${saves.body.saves[0].id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(deletion.status, 200); const backup = await deletion.json();
+    assert.equal(await deletedSocket, 4102); assert.equal((await http()).status, 404); assert.equal((await http('/join', {})).status, 404);
+    const restoredSave = await http(`/saves/${backup.archiveId}/restore`, {}); assert.equal(restoredSave.status, 200);
+    room = await enter(); assert.equal(JSON.parse(room.state.session).worldId, worldId);
+    const replayedHarvest = await message(room, { commandId: 'network-harvest', type: 'harvest', payload: { column: 10, row: 10 } });
+    assert.equal(replayedHarvest.session.seeds, 20); assert.equal((await http('/saves')).body.deleted, null);
     await room.leave();
   } finally {
     for (const room of rooms) { room.removeAllListeners(); room.reconnection.enabled = false; if (room.connection.isOpen) await room.leave().catch(() => undefined); }

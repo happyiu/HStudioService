@@ -11,16 +11,24 @@ defineTypes(WorldState, { session: 'string' });
 
 export class GhomeWorldRoom extends Room<{ state: WorldState }> {
   private ownerId = '';
+  private worldId = '';
+  private deleted = false;
+  private deletedSave = () => {
+    this.deleted = true; this.active = undefined;
+    void this.disconnect(4102).catch(() => this.logger.error('已删除的存档连接关闭失败'));
+  };
   private active?: Client;
   private readonly logger = new Logger(GhomeWorldRoom.name);
   constructor(private readonly worlds: GhomeWorldService, private readonly auth: AuthService) { super(); }
   private changed = () => { void this.sync().catch(() => this.logger.error('世界状态同步失败')); };
   async onCreate(options: { ownerId: string; worldId: string }) {
-    this.ownerId = options.ownerId; this.maxClients = 8; this.patchRate = 100;
+    this.ownerId = options.ownerId; this.worldId = options.worldId; this.maxClients = 8; this.patchRate = 100;
+    if ((await this.worlds.read(this.ownerId)).worldId !== this.worldId) throw new ServerError(409, '存档已变更，请重新载入');
     await this.setPrivate(true);
     this.state = new WorldState();
     await this.sync();
     this.worlds.updates.on(this.ownerId, this.changed);
+    this.worlds.updates.on(`${this.ownerId}:deleted`, this.deletedSave);
     this.clock.setInterval(this.changed, 1000);
     this.clock.setInterval(() => { void this.worlds.flush(this.ownerId).catch(() => {
       this.active?.send('save-error', { message: '位置保存失败，正在重试' });
@@ -29,6 +37,7 @@ export class GhomeWorldRoom extends Room<{ state: WorldState }> {
   async onAuth(client: Client) {
     if (!client.auth?.user || !client.auth?.token) throw new ServerError(401, '请通过已认证接口进入世界');
     const user = await this.auth.verifyAccessToken(client.auth.token);
+    if (this.deleted || (await this.worlds.read(this.ownerId)).worldId !== this.worldId) throw new ServerError(409, '存档已变更，请重新载入');
     if (user.id !== this.ownerId) throw new ServerError(403, '不能进入其他账号的世界');
     return client.auth;
   }
@@ -43,10 +52,10 @@ export class GhomeWorldRoom extends Room<{ state: WorldState }> {
     await this.sync();
   }
   private async run(client: Client, work: () => Promise<any>, reply: boolean, commandId?: string) {
-    if (client !== this.active) return;
+    if (this.deleted || client !== this.active) return;
     try {
       await this.auth.verifyAccessToken(client.auth.token);
-      if (client !== this.active) return;
+      if (this.deleted || client !== this.active) return;
       const result = await work();
       if (reply) client.send('result', result);
     } catch (error) {
@@ -57,7 +66,7 @@ export class GhomeWorldRoom extends Room<{ state: WorldState }> {
     }
   }
   async onDrop(client: Client) {
-    if (client !== this.active) return;
+    if (this.deleted || client !== this.active) return;
     try { await this.allowReconnection(client, 30); }
     catch { if (this.active === client) this.active = undefined; await this.worlds.flush(this.ownerId); }
   }
@@ -71,9 +80,10 @@ export class GhomeWorldRoom extends Room<{ state: WorldState }> {
     if (this.active === client) this.active = undefined;
     await this.worlds.flush(this.ownerId);
   }
-  private async sync() { this.state.session = JSON.stringify(await this.worlds.state(this.ownerId)); }
+  private async sync() { if (!this.deleted) this.state.session = JSON.stringify(await this.worlds.state(this.ownerId)); }
   async onDispose() {
     this.worlds.updates.removeListener(this.ownerId, this.changed);
+    this.worlds.updates.removeListener(`${this.ownerId}:deleted`, this.deletedSave);
     await this.worlds.release(this.ownerId);
   }
 }
