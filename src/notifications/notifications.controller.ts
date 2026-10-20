@@ -1,9 +1,9 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, Param, ParseIntPipe, Patch, Post, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthenticatedUser } from '../auth/types';
-import { CreateSourceDto, ReceiveMessageDto, RegisterPushDeviceDto, UpdateSourceDto } from './notifications.dto';
+import { CreateSourceDto, DeleteMessagesDto, ReceiveMessageDto, RegisterPushDeviceDto, UpdateSourceDto } from './notifications.dto';
 import { NotificationsService } from './notifications.service';
 
 @ApiTags('webhooks')
@@ -26,7 +26,10 @@ export class NotificationsController {
   @Get('push-devices') devices(@CurrentUser() user: AuthenticatedUser) { return this.service.devices(user); }
   @Post('push-devices') register(@CurrentUser() user: AuthenticatedUser, @Body() dto: RegisterPushDeviceDto) { return this.service.registerDevice(user, dto); }
   @Delete('push-devices/:id') unregister(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) { return this.service.unregisterDevice(user, id); }
-  @Get('messages') messages(@CurrentUser() user: AuthenticatedUser, @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number, @Query('before') before?: string) { return this.service.listMessages(user.id, page, before); }
+  @Get('messages') messages(@CurrentUser() user: AuthenticatedUser, @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number, @Query('before') before?: string, @Query('tag') tag?: unknown, @Query('from') from?: unknown, @Query('to') to?: unknown) { return this.service.listMessages(user.id, page, before, tag, from, to); }
   @Get('messages/:id') message(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) { return this.service.message(user.id, id); }
   @Patch('messages/:id/read') read(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) { return this.service.markRead(user.id, id); }
+  @Patch('messages/read-all') readAll(@CurrentUser() user: AuthenticatedUser) { return this.service.markAllRead(user.id); }
+  @Delete('messages/:id') deleteMessage(@CurrentUser() user: AuthenticatedUser, @Param('id', new ParseUUIDPipe({ version: '4' })) id: string) { return this.service.deleteMessages(user.id, [id]); }
+  @Post('messages/delete') @HttpCode(200) deleteMessages(@CurrentUser() user: AuthenticatedUser, @Body() dto: DeleteMessagesDto) { return this.service.deleteMessages(user.id, dto.ids); }
 }

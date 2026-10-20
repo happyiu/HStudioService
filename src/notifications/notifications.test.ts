@@ -15,6 +15,24 @@ import { HttpExceptionFilter } from '../common/http-exception.filter';
 import { GetuiService, PushError } from './getui.service';
 import { NotificationsService } from './notifications.service';
 import { installWebhookParser } from './webhook-parser';
+import { MessageTags1710000000008 } from '../database/migrations/1710000000008-MessageTags';
+import { MessageDeletion1710000000009 } from '../database/migrations/1710000000009-MessageDeletion';
+
+test('tag migration preserves existing messages and defaults their tags to an empty array', async () => {
+  const db = await new DataSource({ type: 'better-sqlite3', database: ':memory:' }).initialize();
+  const runner = db.createQueryRunner(); const migration = new MessageTags1710000000008();
+  try {
+    await db.query('CREATE TABLE hub_messages (id text PRIMARY KEY, content text)');
+    await db.query('INSERT INTO hub_messages VALUES (?, ?)', ['old-message', '保留旧正文']);
+    await migration.up(runner);
+    assert.deepEqual(await db.query('SELECT * FROM hub_messages'), [{ id: 'old-message', content: '保留旧正文', tagsJson: '[]' }]);
+    const deletion = new MessageDeletion1710000000009(); await deletion.up(runner);
+    assert.deepEqual(await db.query('SELECT * FROM hub_messages'), [{ id: 'old-message', content: '保留旧正文', tagsJson: '[]', deletedAt: null }]);
+    await deletion.down(runner);
+    await migration.down(runner);
+    assert.deepEqual(await db.query('SELECT * FROM hub_messages'), [{ id: 'old-message', content: '保留旧正文' }]);
+  } finally { await runner.release(); await db.destroy(); }
+});
 
 test('webhook HTTP, durable outbox, account isolation and session lifecycle', { timeout: 45000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'hstudio-notifications-'));
@@ -83,6 +101,7 @@ test('webhook HTTP, durable outbox, account isolation and session lifecycle', { 
     assert.equal((await http('/messages', 'GET', undefined, alice)).body.unreadCount, 1);
     await http(`/messages/${messageId}/read`, 'PATCH', {}, alice);
     const detail = (await http(`/messages/${messageId}`, 'GET', undefined, alice)).body;
+    assert.deepEqual(detail.tags, []);
     assert.equal(detail.data.taskId, 'secret-not-for-push'); assert.equal(detail.deliveries[0].status, 'accepted');
     assert.equal((await http('/messages', 'GET', undefined, alice)).body.unreadCount, 0);
     assert.equal((await http('/messages?page=-1', 'GET', undefined, alice)).status, 400);
@@ -141,6 +160,109 @@ test('webhook HTTP, durable outbox, account isolation and session lifecycle', { 
     assert.equal((await http(`/messages?before=${invalidCursor}`, 'GET', undefined, alice)).status, 400);
     const bobFresh = await login('bob');
     assert.equal((await http(`/messages?before=${first.nextCursor}`, 'GET', undefined, bobFresh.accessToken)).body.items.length, 0);
+    // Tags survive storage and are filtered before pagination, within the current account.
+    for (const tags of [null, 'indicator', [''], ['  '], [3], ['a', ' a '], ['x'.repeat(33)], Array.from({ length: 11 }, (_, i) => String(i))]) {
+      assert.equal((await http(`/webhooks/${source.id}/messages`, 'POST', { ...dto('invalid-tags'), tags }, source.secret)).status, 400);
+    }
+    const tagged = await http(`/webhooks/${source.id}/messages`, 'POST', { ...dto('tagged'), tags: [' indicator ', 'etf'], data: { symbol: '159605.SZ', price: 0 } }, source.secret);
+    assert.equal(tagged.status, 202);
+    const taggedDetail = (await http(`/messages/${tagged.body.messageId}`, 'GET', undefined, alice)).body;
+    assert.deepEqual(taggedDetail.tags, ['indicator', 'etf']); assert.equal(taggedDetail.data.price, 0);
+    assert.equal((await db!.query('SELECT tagsJson FROM hub_messages WHERE id = ?', [tagged.body.messageId]))[0].tagsJson, '["indicator","etf"]');
+    const duplicateTag = await http(`/webhooks/${source.id}/messages`, 'POST', { ...dto('tagged'), tags: ['changed'] }, source.secret);
+    assert.equal(duplicateTag.body.duplicate, true);
+    for (let i = 0; i < 22; i++) await db!.query(`INSERT INTO hub_messages(id,userId,sourceId,sourceName,title,content,tagsJson,createdAt,expiresAt) VALUES(?,?,?,?,?,?,?,?,?)`,
+      [randomUUID(), user.id, source.id, '标签测试', '指标', '正文', '["indicator"]', stamp - i, stamp + 3600000]);
+    const taggedPage = (await http('/messages?tag=indicator', 'GET', undefined, alice)).body;
+    assert.equal(taggedPage.total, 23); assert.equal(taggedPage.items.length, 20); assert.ok(taggedPage.nextCursor);
+    assert.deepEqual(taggedPage.availableTags, ['etf', 'indicator']);
+    assert.ok(taggedPage.items.every((item: any) => item.tags.includes('indicator')));
+    const taggedSecond = (await http(`/messages?tag=indicator&before=${taggedPage.nextCursor}`, 'GET', undefined, alice)).body;
+    assert.equal(taggedSecond.items.length, 3); assert.equal(taggedSecond.nextCursor, null);
+    assert.equal(new Set([...taggedPage.items, ...taggedSecond.items].map((item: any) => item.id)).size, 23);
+    const etf = (await http('/messages?tag=etf', 'GET', undefined, alice)).body;
+    assert.equal(etf.items[0].data.symbol, '159605.SZ'); assert.equal(etf.total, 1);
+    assert.equal(etf.unreadCount, (await http('/messages', 'GET', undefined, alice)).body.unreadCount);
+    assert.equal((await http('/messages?tag=missing', 'GET', undefined, alice)).body.items.length, 0);
+    const otherAccount = (await http('/messages?tag=indicator', 'GET', undefined, bobFresh.accessToken)).body;
+    assert.deepEqual(otherAccount.availableTags, []); assert.equal(otherAccount.items.length, 0);
+    assert.equal((await http('/messages?tag=', 'GET', undefined, alice)).status, 400);
+    assert.equal((await http('/messages?tag=indicator&tag=etf', 'GET', undefined, alice)).status, 400);
+    const dayStart = Date.UTC(2025, 1, 1); const dayEnd = dayStart + 86400000;
+    for (let i = 0; i < 25; i++) {
+      const createdAt = i === 0 ? dayStart - 1 : i === 24 ? dayEnd : i === 23 ? dayEnd - 1 : dayStart + i - 1;
+      await db!.query('INSERT INTO hub_messages(id,userId,sourceId,sourceName,title,content,tagsJson,createdAt,expiresAt) VALUES(?,?,?,?,?,?,?,?,?)',
+        [randomUUID(), user.id, source.id, '日期测试', '当日消息', '正文', '["indicator"]', createdAt, dayEnd + 3600000]);
+    }
+    const dateQuery = `from=${dayStart}&to=${dayEnd}`;
+    const dated = (await http(`/messages?${dateQuery}&tag=indicator`, 'GET', undefined, alice)).body;
+    assert.equal(dated.total, 23); assert.equal(dated.items.length, 20); assert.ok(dated.nextCursor);
+    assert.ok(dated.items.every((item: any) => item.createdAt >= dayStart && item.createdAt < dayEnd));
+    const datedMore = (await http(`/messages?${dateQuery}&tag=indicator&before=${dated.nextCursor}`, 'GET', undefined, alice)).body;
+    assert.equal(datedMore.items.length, 3); assert.equal(datedMore.nextCursor, null);
+    assert.equal(new Set([...dated.items, ...datedMore.items].map((item: any) => item.id)).size, 23);
+    assert.equal((await http(`/messages?${dateQuery}&tag=etf`, 'GET', undefined, alice)).body.total, 0);
+    assert.equal((await http(`/messages?${dateQuery}`, 'GET', undefined, bobFresh.accessToken)).body.total, 0);
+    for (const query of ['from=1', 'to=2', 'from=2&to=1', 'from=1&to=1', 'from=NaN&to=2', 'from=-1&to=2', 'from=1&from=2&to=3', 'from=1&to=9007199254740992']) {
+      assert.equal((await http(`/messages?${query}`, 'GET', undefined, alice)).status, 400);
+    }
+    const bobSource = (await http('/webhook-sources', 'POST', { name: 'Bob 通知' }, bobFresh.accessToken)).body;
+    await http(`/webhooks/${bobSource.id}/messages`, 'POST', dto('bob-unread'), bobSource.secret);
+    assert.equal((await http('/messages/read-all', 'PATCH')).status, 401);
+    await db!.query("CREATE TRIGGER fail_read_all BEFORE UPDATE OF readAt ON hub_messages BEGIN SELECT RAISE(ABORT, 'read failure'); END");
+    assert.equal((await http('/messages/read-all', 'PATCH', {}, alice)).status, 500);
+    await db!.query('DROP TRIGGER fail_read_all');
+    assert.ok((await http('/messages', 'GET', undefined, alice)).body.unreadCount > 0);
+    const allRead = await http('/messages/read-all', 'PATCH', {}, alice);
+    assert.equal(allRead.status, 200); assert.ok(Number.isSafeInteger(allRead.body.readAt));
+    assert.equal((await http('/messages', 'GET', undefined, alice)).body.unreadCount, 0);
+    assert.equal((await http('/messages', 'GET', undefined, bobFresh.accessToken)).body.unreadCount, 1);
+    assert.equal((await http(`/messages/${messageId}`, 'GET', undefined, alice)).body.readAt, detail.readAt);
+    await http('/messages/read-all', 'PATCH', {}, alice);
+    assert.equal((await http(`/messages/${tagged.body.messageId}`, 'GET', undefined, alice)).body.readAt, allRead.body.readAt);
+    // Single/batch deletion is owner scoped, atomic and cancels pending deliveries without breaking deduplication.
+    await http('/push-devices', 'POST', device(99), alice);
+    const deleting: string[] = [];
+    for (const eventId of ['delete-single', 'delete-batch-1', 'delete-batch-2']) {
+      const result = await http(`/webhooks/${source.id}/messages`, 'POST', { ...dto(eventId), tags: ['only-delete'] }, source.secret);
+      assert.equal(result.status, 202); deleting.push(result.body.messageId);
+    }
+    const beforeDelete = (await http('/messages', 'GET', undefined, alice)).body;
+    assert.equal(beforeDelete.unreadCount, 3);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'DELETE')).status, 401);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'DELETE', undefined, bobFresh.accessToken)).status, 404);
+    const [bobMessage] = await db!.query('SELECT id FROM hub_messages WHERE userId = ?', [bobId]);
+    assert.equal((await http('/messages/delete', 'POST', { ids: [deleting[0], bobMessage.id] }, alice)).status, 404);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'GET', undefined, alice)).status, 200);
+    for (const ids of [null, [], ['bad-id'], [deleting[0], deleting[0]], Array.from({ length: 101 }, () => randomUUID())]) {
+      assert.equal((await http('/messages/delete', 'POST', { ids }, alice)).status, 400);
+    }
+    assert.equal((await http('/messages/bad-id', 'DELETE', undefined, alice)).status, 400);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'DELETE', undefined, alice)).status, 200);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'DELETE', undefined, alice)).status, 200);
+    assert.equal((await http(`/messages/${deleting[0]}`, 'GET', undefined, alice)).status, 404);
+    assert.equal((await http(`/messages/${deleting[0]}/read`, 'PATCH', {}, alice)).status, 404);
+    const repeated = await http(`/webhooks/${source.id}/messages`, 'POST', dto('delete-single'), source.secret);
+    assert.equal(repeated.body.duplicate, true); assert.equal(repeated.body.messageId, deleting[0]);
+    assert.equal((await http('/messages', 'GET', undefined, alice)).body.unreadCount, 2);
+    assert.ok((await db!.query('SELECT deletedAt FROM hub_messages WHERE id = ?', [deleting[0]]))[0].deletedAt);
+    assert.equal((await db!.query('SELECT status FROM push_deliveries WHERE messageId = ?', [deleting[0]]))[0].status, 'cancelled');
+    await db!.query("CREATE TRIGGER fail_message_delete BEFORE UPDATE OF deletedAt ON hub_messages BEGIN SELECT RAISE(ABORT, 'delete failure'); END");
+    assert.equal((await http('/messages/delete', 'POST', { ids: deleting.slice(1) }, alice)).status, 500);
+    await db!.query('DROP TRIGGER fail_message_delete');
+    assert.equal((await http(`/messages/${deleting[1]}`, 'GET', undefined, alice)).status, 200);
+    await db!.query("UPDATE push_deliveries SET status = 'sending' WHERE messageId = ?", [deleting[1]]);
+    assert.equal((await http('/messages/delete', 'POST', { ids: deleting.slice(1) }, alice)).status, 200);
+    const afterDelete = (await http('/messages', 'GET', undefined, alice)).body;
+    assert.equal(afterDelete.unreadCount, 0); assert.equal(afterDelete.total, beforeDelete.total - 3);
+    assert.ok(!afterDelete.availableTags.includes('only-delete'));
+    assert.equal((await http('/messages?tag=only-delete', 'GET', undefined, alice)).body.total, 0);
+    for (const id of deleting) {
+      assert.equal((await http(`/messages/${id}`, 'GET', undefined, alice)).status, 404);
+      assert.ok((await db!.query('SELECT status FROM push_deliveries WHERE messageId = ?', [id])).every((row: any) => row.status === 'cancelled'));
+    }
+    await service!.processDue(); assert.ok(!sent.some(item => deleting.includes(item.payload.messageId)));
+    assert.equal((await http('/messages', 'GET', undefined, bobFresh.accessToken)).body.unreadCount, 1);
     const limits = await Promise.all(Array.from({ length: 65 }, (_, i) => receive(`rate-${i}`))); assert.ok(limits.some(result => result.status === 429));
   } finally { if (app) await app.close(); await rm(directory, { recursive: true, force: true }); }
 });

@@ -6,7 +6,7 @@
 
 ## 使用
 
-App 或 H5 打开侧边栏的「Webhook 管理」，创建一个来源，保存当次展示的接入信息。每个来源绑定当前账号；密钥不出现在列表，重置后旧密钥立即失效，停用后拒绝接收新消息。手机打开「消息中心」，点击「开启 / 管理系统通知」。拒绝通知权限仍可查看站内消息。
+App 或 H5 打开「消息中心 → Webhook 设置」，创建一个来源，保存当次展示的接入信息。每个来源绑定当前账号；密钥不出现在列表，重置后旧密钥立即失效，停用后拒绝接收新消息。拒绝通知权限仍可查看站内消息。
 
 ```sh
 curl -X POST 'https://<服务域名>/api/v1/webhooks/<sourceId>/messages' \
@@ -18,6 +18,47 @@ curl -X POST 'https://<服务域名>/api/v1/webhooks/<sourceId>/messages' \
 响应：`{"messageId":"<UUID>","duplicate":false}`。重试必须保留 `eventId`；相同来源及 eventId 返回同一消息，不重复创建发送任务。省略 eventId 时，每次请求视为新消息。不要把 Webhook 密钥放进 URL。
 
 输入为 JSON：标题 1–100 字符、正文 1–16000 字符、可选 eventId 1–128 字符、可选 data 对象，总请求体不超过 64 KiB；来源名称 1–80 字符。内容以纯文本呈现，不执行 HTML。每个来源每分钟最多 60 次已通过鉴权的请求（含重复请求）；计数随服务重启重置。常见错误：400 格式无效、401 密钥无效、403 来源停用、413 请求过大、429 频率超限、5xx 保存失败。5xx/网络异常/429 可退避重试。
+
+## 消息标签与指标卡片
+
+Webhook 顶层可选 `tags` 字符串数组，最多 10 个标签，每个标签去除首尾空格后为 1–32 字符，不可重复，区分大小写。省略时为 `[]`，旧消息也默认无标签。消息在数据库中使用 `tagsJson` 保存标签；列表和详情返回解析后的 `tags` 与 `data`。相同来源及 `eventId` 的重试保留原消息及标签。
+
+消息中心可按单个标签筛选：`GET /api/v1/messages?tag=indicator`，可与 `before` 游标组合。返回 `total` 为筛选结果数量，`unreadCount` 始终为当前账号全部消息的未读数，`availableTags` 为当前账号所有消息使用的标签（不受当前筛选影响）。
+
+日历筛选使用 `from`、`to` 两个毫秒时间戳，按 `createdAt >= from AND createdAt < to` 查询，可与标签、游标组合。App 根据用户本地时区计算所选日期的当天零点和次日零点；省略两者表示全部日期。必须同时提供两个有效时间戳，且 `from < to`。
+
+`indicator` 标签使用指标信号卡片；其余标签使用普通卡片。`data` 中的 `symbol`、`indicator_name`、`period`、`signal_name` 必须为非空字符串，缺失或类型不符时显示普通卡片。`price` 为可选有限数值，未提供时显示 `—`；`test: true` 显示「模拟测试」。详情仍保留原始正文和附加数据。
+
+指标卡片可选 `data.symbol_name` 提供标的名称，未提供时显示代码；`asset_type` 为 `stock` 时价格显示两位小数，ETF 及未指定类型时显示三位小数。可选 `data.quote_url` 提供 HTTP(S) 行情链接，未提供合法链接时列表显示「查看详情」。`notification` 标签在界面显示为「系统通知」，`indicator` 显示为「交易信号」。
+
+指标卡片使用 `phase`（缺失时使用 `type`）区分 `preview` 盘中预警、`confirmed` 收盘确认。`confirmation` 单独展示：`pending` 待收盘确认、`confirmed` 已确认、`unconfirmed` 收盘未确认、`missing_data` 数据缺失未能确认；缺失时不推断确认结果。`delayed: true` 显示延迟确认标记。列表展示 `bar_end` 的 K 线结束时间，右上角优先使用毫秒时间戳 `ts` 的事件生成时间，缺失时沿用消息接收时间。无时区的 `bar_end` 字符串保留发送端的原始钟面时间，不做 UTC 转换。
+
+详情展示 `data.message` 描述（缺失时回退消息正文）、K 线结束时间、事件生成时间、确认状态、是否延迟、消息接收时间。`indicator_id`、`signal_id`、`event_id`、`rule_id`、`generation`、`source`、`snapshot_id` 放在可展开的事件与规则信息中；原始消息数据另行折叠保留。
+
+`PATCH /api/v1/messages/read-all` 使用登录 JWT，将当前账号所有未读消息（含未加载和其他标签）标记已读，保留原有已读时间，返回 `{success: true, readAt: <毫秒时间戳>}`。
+
+消息删除同样需要登录 JWT：`DELETE /api/v1/messages/:id` 删除单条；`POST /api/v1/messages/delete` 接收 `{ "ids": ["消息UUID", "消息UUID"] }` 批量删除，每次 1–100 个不重复的 UUID。两者成功均返回 `{success: true}`。批量操作会先验证所有消息归属，混入其他账号或不存在的 ID 时整体失败；重复删除本人已经删除的消息不会报错。
+
+迁移 `1710000000009` 添加 `deletedAt`。删除后消息不再出现在列表、详情、未读统计和标签分类中，待发送任务取消。数据库保留原始记录及 `eventId`，同一事件重试不会重新创建消息。已经交给系统推送服务的通知无法撤回。
+
+```json
+{
+  "eventId": "indicator-20261020-001",
+  "title": "指标监控",
+  "content": "159605.SZ 天使魔鬼 · 30分钟 · 进攻信号",
+  "tags": ["indicator", "etf"],
+  "data": {
+    "symbol": "159605.SZ",
+    "indicator_name": "天使魔鬼",
+    "period": "30m",
+    "signal_name": "进攻",
+    "price": 1.25,
+    "test": true
+  }
+}
+```
+
+更新后端后，启动时自动执行迁移 `1710000000008`，增加 `tagsJson` 列，不改变旧消息的正文与附加数据。发送端需显式添加 `tags: ["indicator"]` 才会使用指标卡片。
 
 ## 推送服务配置
 

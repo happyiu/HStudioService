@@ -74,8 +74,8 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         if (existing) return { messageId: existing.id, duplicate: true };
       }
       const messageId = randomUUID();
-      await manager.query(`INSERT INTO hub_messages(id,userId,sourceId,sourceName,eventId,title,content,dataJson,createdAt,expiresAt)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`, [messageId, source.userId, id, source.name, dto.eventId ?? null, dto.title, dto.content, dto.data ? JSON.stringify(dto.data) : null, now, now + 3600000]);
+      await manager.query(`INSERT INTO hub_messages(id,userId,sourceId,sourceName,eventId,title,content,dataJson,tagsJson,createdAt,expiresAt)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [messageId, source.userId, id, source.name, dto.eventId ?? null, dto.title, dto.content, dto.data ? JSON.stringify(dto.data) : null, JSON.stringify(dto.tags ?? []), now, now + 3600000]);
       await manager.query(`INSERT INTO push_deliveries(id,messageId,deviceId,sessionId,cid,status,attempts,nextAttemptAt,updatedAt)
         SELECT lower(hex(randomblob(16))), ?, d.id, d.sessionId, d.cid, 'pending', 0, ?, ? FROM push_devices d
         JOIN auth_sessions s ON s.id = d.sessionId AND s.userId = d.userId JOIN users u ON u.id = d.userId
@@ -119,8 +119,13 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       return { success: true };
     });
   }
-  async listMessages(userId: string, page: number, before?: string) {
+  async listMessages(userId: string, page: number, before?: string, tag?: unknown, from?: unknown, to?: unknown) {
     if (!Number.isInteger(page) || page < 1 || page > 100000) throw new BadRequestException('page 必须是正整数');
+    if (tag !== undefined && (typeof tag !== 'string' || !tag.trim() || tag.length > 32)) throw new BadRequestException('tag 必须是 1–32 字符的标签');
+    if (from !== undefined || to !== undefined) {
+      const timestamp = (value: unknown) => typeof value === 'string' && /^\d{1,16}$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) <= 8640000000000000;
+      if (!timestamp(from) || !timestamp(to) || Number(from) >= Number(to)) throw new BadRequestException('from 和 to 必须为有效的毫秒时间戳，且 from 小于 to');
+    }
     let cursor: { createdAt: number; id: string } | undefined;
     if (before !== undefined) {
       try {
@@ -129,19 +134,27 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         if (!cursor || !Number.isSafeInteger(cursor.createdAt) || cursor.createdAt < 0 || typeof cursor.id !== 'string' || !/^[a-f0-9-]{36}$/.test(cursor.id)) throw Error();
       } catch { throw new BadRequestException('分页游标无效'); }
     }
-    const [counts] = await this.db.query('SELECT COUNT(*) AS total, COALESCE(SUM(readAt IS NULL),0) AS unreadCount FROM hub_messages WHERE userId = ?', [userId]);
-    const rows = await this.db.query(`SELECT id,sourceName,title,substr(content,1,160) AS preview,createdAt,readAt FROM hub_messages WHERE userId = ?
+    const [counts] = await this.db.query('SELECT COUNT(*) AS total, COALESCE(SUM(readAt IS NULL),0) AS unreadCount FROM hub_messages WHERE userId = ? AND deletedAt IS NULL', [userId]);
+    const filters = (tag === undefined ? '' : 'AND EXISTS (SELECT 1 FROM json_each(tagsJson) WHERE value = ?)') + (from === undefined ? '' : ' AND createdAt >= ? AND createdAt < ?');
+    const params: (string | number)[] = tag === undefined ? [userId] : [userId, tag];
+    if (from !== undefined) params.push(Number(from), Number(to));
+    if (tag !== undefined || from !== undefined) {
+      const [filtered] = await this.db.query(`SELECT COUNT(*) AS total FROM hub_messages WHERE userId = ? AND deletedAt IS NULL ${filters}`, params);
+      counts.total = filtered.total;
+    }
+    const availableTags = await this.db.query(`SELECT DISTINCT t.value AS tag FROM hub_messages m, json_each(m.tagsJson) t WHERE m.userId = ? AND m.deletedAt IS NULL ORDER BY t.value`, [userId]);
+    const rows = await this.db.query(`SELECT id,sourceName,title,substr(content,1,160) AS preview,tagsJson,dataJson,createdAt,readAt FROM hub_messages WHERE userId = ? AND deletedAt IS NULL ${filters}
       ${cursor ? 'AND (createdAt < ? OR (createdAt = ? AND id < ?))' : ''}
-      ORDER BY createdAt DESC,id DESC LIMIT 21 OFFSET ?`, cursor ? [userId, cursor.createdAt, cursor.createdAt, cursor.id, 0] : [userId, (page - 1) * 20]);
-    const items = rows.slice(0, 20); const last = items[items.length - 1];
+      ORDER BY createdAt DESC,id DESC LIMIT 21 OFFSET ?`, cursor ? [...params, cursor.createdAt, cursor.createdAt, cursor.id, 0] : [...params, (page - 1) * 20]);
+    const items = rows.slice(0, 20).map(({ tagsJson, dataJson, ...row }: any) => ({ ...row, tags: JSON.parse(tagsJson), data: dataJson ? JSON.parse(dataJson) : null })); const last = items[items.length - 1];
     const nextCursor = rows.length > 20 ? Buffer.from(JSON.stringify({ createdAt: last.createdAt, id: last.id })).toString('base64url') : null;
-    return { ...counts, items, page, pageSize: 20, nextCursor };
+    return { ...counts, items, page, pageSize: 20, nextCursor, availableTags: availableTags.map((row: any) => row.tag) };
   }
   async message(userId: string, id: string) {
-    const [row] = await this.db.query('SELECT * FROM hub_messages WHERE id = ? AND userId = ?', [id, userId]);
+    const [row] = await this.db.query('SELECT * FROM hub_messages WHERE id = ? AND userId = ? AND deletedAt IS NULL', [id, userId]);
     if (!row) throw new NotFoundException('消息不存在');
     const deliveries = await this.db.query('SELECT status,attempts,lastError,updatedAt FROM push_deliveries WHERE messageId = ?', [id]);
-    const { dataJson, ...message } = row; return { ...message, data: dataJson ? JSON.parse(dataJson) : null, deliveries };
+    const { dataJson, tagsJson, deletedAt, ...message } = row; return { ...message, tags: JSON.parse(tagsJson), data: dataJson ? JSON.parse(dataJson) : null, deliveries };
   }
   async markRead(userId: string, id: string) {
     return this.write(async () => {
@@ -149,6 +162,23 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       await this.db.query('UPDATE hub_messages SET readAt = COALESCE(readAt,?) WHERE id = ? AND userId = ?', [Date.now(), id, userId]);
       return { success: true };
     });
+  }
+  async markAllRead(userId: string) {
+    return this.write(async () => {
+      const readAt = Date.now();
+      await this.db.query('UPDATE hub_messages SET readAt = ? WHERE userId = ? AND readAt IS NULL AND deletedAt IS NULL', [readAt, userId]);
+      return { success: true, readAt };
+    });
+  }
+  async deleteMessages(userId: string, ids: string[]) {
+    return this.write(() => this.db.transaction(async manager => {
+      const placeholders = ids.map(() => '?').join(',');
+      const owned = await manager.query(`SELECT id FROM hub_messages WHERE userId = ? AND id IN (${placeholders})`, [userId, ...ids]);
+      if (owned.length !== ids.length) throw new NotFoundException('消息不存在');
+      await manager.query(`UPDATE hub_messages SET deletedAt = ? WHERE userId = ? AND deletedAt IS NULL AND id IN (${placeholders})`, [Date.now(), userId, ...ids]);
+      await manager.query(`UPDATE push_deliveries SET status = 'cancelled',lastError = '消息已删除',updatedAt = ? WHERE messageId IN (${placeholders}) AND status IN ('pending','sending')`, [Date.now(), ...ids]);
+      return { success: true };
+    }));
   }
   processDue(): Promise<void> {
     if (this.stopped) return Promise.resolve();
@@ -163,7 +193,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       if (this.stopped) return;
       const row = await this.write(async () => {
         const [row] = await this.db.query(`SELECT p.*, m.userId, m.title, m.content, m.expiresAt, d.platform,
-          CASE WHEN d.enabled = 1 AND d.userId = m.userId AND d.sessionId = p.sessionId AND d.cid = p.cid AND ${ACTIVE_SESSION} THEN 1 ELSE 0 END AS valid
+          CASE WHEN m.deletedAt IS NULL AND d.enabled = 1 AND d.userId = m.userId AND d.sessionId = p.sessionId AND d.cid = p.cid AND ${ACTIVE_SESSION} THEN 1 ELSE 0 END AS valid
           FROM push_deliveries p JOIN hub_messages m ON m.id = p.messageId JOIN push_devices d ON d.id = p.deviceId
           JOIN auth_sessions s ON s.id = p.sessionId JOIN users u ON u.id = m.userId WHERE p.id = ? AND p.status = 'pending'`, [task.id]);
         if (!row) return null;
