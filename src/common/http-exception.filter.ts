@@ -22,7 +22,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const details = exception instanceof HttpException ? exception.getResponse() : undefined;
     const message = typeof details === 'string' || Array.isArray(details)
       ? details
-      : (details as { message?: string | string[] } | undefined)?.message || (parserType === 'entity.too.large' ? '请求体超过 2 MiB' : parserType === 'entity.parse.failed' ? 'JSON 格式无效' : 'Internal server error');
+      : (details as { message?: string | string[] } | undefined)?.message || (parserType === 'entity.too.large' ? '请求体超过大小限制' : parserType === 'entity.parse.failed' ? 'JSON 格式无效' : 'Internal server error');
 
     response.status(status).json({
       statusCode: status,

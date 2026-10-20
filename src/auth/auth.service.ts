@@ -98,6 +98,7 @@ export class AuthService implements OnModuleInit {
     if (!valid) {
       session.revokedAt = new Date();
       await this.sessions.save(session);
+      await this.disablePush(session.userId, session.id);
       throw new UnauthorizedException('Refresh Token 无效');
     }
 
@@ -105,6 +106,7 @@ export class AuthService implements OnModuleInit {
     if (!user?.isActive) {
       session.revokedAt = new Date();
       await this.sessions.save(session);
+      await this.disablePush(session.userId, session.id);
       throw new UnauthorizedException('账号不可用');
     }
 
@@ -144,6 +146,7 @@ export class AuthService implements OnModuleInit {
       { id: user.sessionId, userId: user.id },
       { revokedAt: new Date() },
     );
+    await this.disablePush(user.id, user.sessionId);
     return { success: true };
   }
 
@@ -152,6 +155,7 @@ export class AuthService implements OnModuleInit {
       { userId: user.id, revokedAt: IsNull() },
       { revokedAt: new Date() },
     );
+    await this.disablePush(user.id);
     return { success: true };
   }
 
@@ -178,7 +182,16 @@ export class AuthService implements OnModuleInit {
     }
     session.revokedAt = new Date();
     await this.sessions.save(session);
+    await this.disablePush(userId, sessionId);
     return { success: true };
+  }
+
+  private async disablePush(userId: string, sessionId?: string): Promise<void> {
+    const where = 'userId = ?' + (sessionId ? ' AND sessionId = ?' : '');
+    const parameters = sessionId ? [userId, sessionId] : [userId];
+    await this.sessions.manager.query(`UPDATE push_devices SET enabled = 0 WHERE ${where}`, parameters);
+    await this.sessions.manager.query(`UPDATE push_deliveries SET status = 'cancelled',lastError = '登录会话已撤销',updatedAt = ?
+      WHERE status IN ('pending','sending') AND deviceId IN (SELECT id FROM push_devices WHERE ${where})`, [Date.now(), ...parameters]);
   }
 
   private async issueTokens(user: User, session: AuthSession, refreshToken: string) {

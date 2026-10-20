@@ -9,10 +9,12 @@ import { GhomeWorldGateway } from './ghome-world/ghome-world.gateway';
 
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/http-exception.filter';
+import { installWebhookParser } from './notifications/webhook-parser';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
 
+  installWebhookParser(app);
   app.useBodyParser('json', { limit: '2mb' });
   app.enableShutdownHooks();
   app.enableCors({ origin: true });

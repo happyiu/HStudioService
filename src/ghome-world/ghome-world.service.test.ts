@@ -161,6 +161,15 @@ test('stable creature identities persist while invalid positions and forged IDs 
   await assert.rejects(f.service.checkpoint('alice', { creatures: [creature, creature] }), /重复/);
 }));
 
+test('Charizard checkpoints restore position and facing with its registered ground body', async () => fixture(async f => {
+  await f.service.bootstrap('alice', { snapshot: farmMap() });
+  const creature = { id: 'charizard:0', type: 'charizard', x: 500, y: 500, facing: 'right' };
+  await f.service.checkpoint('alice', { creatures: [creature] });
+  assert.deepEqual((await f.restart().state('alice')).creatures.find(entry => entry.id === creature.id), creature);
+  await f.service.checkpoint('alice', { creatures: [{ ...creature, x: -999 }] });
+  assert.equal((await f.service.state('alice')).creatures.find(entry => entry.id === creature.id)?.x, 500);
+}));
+
 async function ready(service: GhomeWorldService, ownerId = 'alice') {
   for (let i = 0; i < 100; i++) {
     const entry = await service.entry(ownerId);

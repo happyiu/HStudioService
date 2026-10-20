@@ -18,6 +18,7 @@ import { DevicesModule } from './devices/devices.module';
 import { GhomeModule } from './ghome/ghome.module';
 import { LuckyModule } from './lucky/lucky.module';
 import { PveModule } from './pve/pve.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { PveModule } from './pve/pve.module';
     GhomeWorldModule,
     LuckyModule,
     PveModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
 })

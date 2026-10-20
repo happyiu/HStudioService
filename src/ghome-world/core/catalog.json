@@ -526,6 +526,20 @@
         "offsetY": 10
       },
       "movementMode": "walk"
+    },
+    {
+      "id": "charizard:0",
+      "type": "charizard",
+      "scale": 1.25,
+      "frameWidth": 40,
+      "frameHeight": 48,
+      "body": {
+        "width": 16,
+        "height": 7,
+        "offsetX": 12,
+        "offsetY": 23
+      },
+      "movementMode": "walk"
     }
   ]
 }
