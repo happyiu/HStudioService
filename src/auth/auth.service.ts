@@ -1,16 +1,17 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { Injectable, Logger, NotFoundException, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as argon2 from 'argon2';
-import { IsNull, Repository } from 'typeorm';
+import { EntityManager, IsNull, Repository } from 'typeorm';
 
 import { AuthSession } from '../database/entities/auth-session.entity';
 import { User } from '../database/entities/user.entity';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { AccessTokenPayload, AuthenticatedUser, RequestMetadata } from './types';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
@@ -78,7 +79,11 @@ export class AuthService implements OnModuleInit {
     });
     const refreshToken = this.createRefreshToken(session.id);
     session.refreshTokenHash = await this.hash(refreshToken);
-    await this.sessions.save(session);
+    await this.sessions.manager.transaction(async manager => {
+      const current = await manager.findOneBy(User, { id: user.id, passwordHash: user.passwordHash, isActive: true });
+      if (!current) throw new UnauthorizedException('账号或密码已变更，请重新登录');
+      await manager.save(AuthSession, session);
+    });
     return this.issueTokens(user, session, refreshToken);
   }
 
@@ -111,12 +116,18 @@ export class AuthService implements OnModuleInit {
     }
 
     const refreshToken = this.createRefreshToken(session.id);
+    const previousHash = session.refreshTokenHash;
     session.refreshTokenHash = await this.hash(refreshToken);
     session.expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
     session.lastUsedAt = new Date();
     session.userAgent = metadata.userAgent?.slice(0, 255) || session.userAgent;
     session.ipAddress = metadata.ipAddress?.slice(0, 64) || session.ipAddress;
-    await this.sessions.save(session);
+    const updated = await this.sessions.update(
+      { id: session.id, refreshTokenHash: previousHash, revokedAt: IsNull() },
+      { refreshTokenHash: session.refreshTokenHash, expiresAt: session.expiresAt, lastUsedAt: session.lastUsedAt,
+        userAgent: session.userAgent, ipAddress: session.ipAddress },
+    );
+    if (!updated.affected) throw new UnauthorizedException('登录会话已失效');
     return this.issueTokens(user, session, refreshToken);
   }
 
@@ -159,6 +170,23 @@ export class AuthService implements OnModuleInit {
     return { success: true };
   }
 
+  async changePassword(identity: AuthenticatedUser, credentials: ChangePasswordDto): Promise<{ success: boolean }> {
+    const user = await this.users.findOneBy({ id: identity.id, isActive: true });
+    if (!user) throw new UnauthorizedException('账号不可用');
+    let valid = false;
+    try { valid = await argon2.verify(user.passwordHash, credentials.currentPassword); } catch { /* Reject invalid hashes. */ }
+    if (!valid) throw new BadRequestException('原密码不正确');
+    if (credentials.newPassword === credentials.currentPassword) throw new BadRequestException('新密码不能与原密码相同');
+    const passwordHash = await this.hash(credentials.newPassword);
+    await this.users.manager.transaction(async manager => {
+      const updated = await manager.update(User, { id: user.id, passwordHash: user.passwordHash, isActive: true }, { passwordHash });
+      if (!updated.affected) throw new BadRequestException('密码已变更，请重新登录后再试');
+      await manager.update(AuthSession, { userId: user.id, revokedAt: IsNull() }, { revokedAt: new Date() });
+      await this.disablePush(user.id, undefined, manager);
+    });
+    return { success: true };
+  }
+
   async listSessions(userId: string) {
     const sessions = await this.sessions.find({
       where: { userId },
@@ -186,11 +214,11 @@ export class AuthService implements OnModuleInit {
     return { success: true };
   }
 
-  private async disablePush(userId: string, sessionId?: string): Promise<void> {
+  private async disablePush(userId: string, sessionId?: string, manager: EntityManager = this.sessions.manager): Promise<void> {
     const where = 'userId = ?' + (sessionId ? ' AND sessionId = ?' : '');
     const parameters = sessionId ? [userId, sessionId] : [userId];
-    await this.sessions.manager.query(`UPDATE push_devices SET enabled = 0 WHERE ${where}`, parameters);
-    await this.sessions.manager.query(`UPDATE push_deliveries SET status = 'cancelled',lastError = '登录会话已撤销',updatedAt = ?
+    await manager.query(`UPDATE push_devices SET enabled = 0 WHERE ${where}`, parameters);
+    await manager.query(`UPDATE push_deliveries SET status = 'cancelled',lastError = '登录会话已撤销',updatedAt = ?
       WHERE status IN ('pending','sending') AND deviceId IN (SELECT id FROM push_devices WHERE ${where})`, [Date.now(), ...parameters]);
   }
 

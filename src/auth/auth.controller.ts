@@ -7,6 +7,7 @@ import { JwtAuthGuard } from './auth.guard';
 import { CurrentUser } from './current-user.decorator';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { AuthenticatedUser, RequestMetadata } from './types';
 
 function metadata(request: Request): RequestMetadata {
@@ -51,6 +52,15 @@ export class AuthController {
   @ApiOperation({ summary: '撤销当前用户的全部会话' })
   logoutAll(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.logoutAll(user);
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '验证原密码并修改密码，撤销全部登录会话' })
+  changePassword(@CurrentUser() user: AuthenticatedUser, @Body() credentials: ChangePasswordDto) {
+    return this.authService.changePassword(user, credentials);
   }
 
   @Get('me')

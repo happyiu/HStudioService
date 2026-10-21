@@ -9,7 +9,7 @@
     "start": "node dist/main.js",
     "start:dev": "node --watch -r ts-node/register src/main.ts",
     "check": "tsc --noEmit",
-    "test": "node --test -r ts-node/register src/ghome/ghome.service.test.ts src/ghome-world/*.test.ts src/notifications/*.test.ts",
+    "test": "node --test -r ts-node/register src/auth/*.test.ts src/ghome/ghome.service.test.ts src/ghome-world/*.test.ts src/notifications/*.test.ts",
     "db:migrate": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
     "db:revert": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:revert"
   },
