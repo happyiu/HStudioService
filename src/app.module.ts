@@ -1,3 +1,4 @@
+import { ChanjingModule } from './chanjing/chanjing.module';
 import { GhomePlayer, GhomeWorldCreation, GhomeSaveArchive } from './database/entities/ghome-player.entity';
 import { GhomeWorldModule } from './ghome-world/ghome-world.module';
 import { GhomeWorld, GhomeCommandReceipt } from './database/entities/ghome-world.entity';
@@ -42,6 +43,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     LuckyModule,
     PveModule,
     NotificationsModule,
+    ChanjingModule,
   ],
   controllers: [AppController],
 })
