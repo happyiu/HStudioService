@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, HttpException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, HttpException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 export type Period = '1d' | '1w' | '1mo' | '30m';
@@ -142,5 +142,12 @@ export class ChanjingService {
     if (input.period !== '1d') params.period = input.period;
     const raw = await this.upstream(input.period === '1d' ? '/api/kline/daily' : '/api/kline/period', params);
     return normalizeAnalysis(raw, input);
+  }
+  async radar() {
+    return this.upstream('/api/kline/etf-pool/radar');
+  }
+  async radarJob(jobId: string) {
+    if (!/^[a-f0-9]{10}$/.test(jobId)) throw new NotFoundException('雷达任务不存在');
+    return this.upstream(`/api/kline/etf-pool/radar/jobs/${jobId}`);
   }
 }

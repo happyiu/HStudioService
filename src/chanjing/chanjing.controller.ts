@@ -15,4 +15,6 @@ export class ChanjingController {
   @Post('watchlist') add(@Body() body: AddAssetDto) { return this.chanjing.add(body.symbol); }
   @Delete('watchlist/:symbol') remove(@Param('symbol') symbol: string) { return this.chanjing.remove(symbol); }
   @Get('analysis') analysis(@Query() query: Record<string, string>) { return this.chanjing.analysis(query); }
+  @Get('radar') radar() { return this.chanjing.radar(); }
+  @Get('radar/jobs/:jobId') radarJob(@Param('jobId') jobId: string) { return this.chanjing.radarJob(jobId); }
 }
