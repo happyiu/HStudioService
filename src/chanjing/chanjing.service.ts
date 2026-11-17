@@ -118,6 +118,23 @@ export class ChanjingService {
         asOf: q.quote_time || q.date || quotes.as_of || null };
     }), shared: true };
   }
+  async watchlistMarketTrends(symbols: string[], assetType: AssetType) {
+    return this.upstream('/api/watchlist/market-trends', {}, 'POST', { symbols, asset_type: assetType });
+  }
+  async overviewIndex() {
+    const symbol = '000001.SH';
+    const [quotes, trends] = await Promise.all([
+      this.upstream('/api/intraday/indices', { symbols: symbol }),
+      this.upstream('/api/watchlist/market-trends', {}, 'POST', { symbols: [symbol], asset_type: 'index' }),
+    ]);
+    const quote = list(quotes.rows).find(row => row.symbol === symbol);
+    return {
+      price: number(quote?.last_price ?? quote?.close),
+      // The index quote endpoint already returns percentage points.
+      changePercent: number(quote?.change_pct),
+      periods: list(trends.rows).find(row => row.symbol === symbol)?.periods ?? null,
+    };
+  }
   private invalidateWatchlist() {
     for (const key of this.pending.keys()) if (new URL(key).pathname.startsWith('/api/watchlist')) this.pending.delete(key);
   }
@@ -142,6 +159,36 @@ export class ChanjingService {
     if (input.period !== '1d') params.period = input.period;
     const raw = await this.upstream(input.period === '1d' ? '/api/kline/daily' : '/api/kline/period', params);
     return normalizeAnalysis(raw, input);
+  }
+  async marketTrend(query: Row, dowOnly = false) {
+    const input = validateAnalysis(query);
+    if (!['1w', '1d', '30m'].includes(input.period) || (dowOnly && input.period !== '1d')) throw new BadRequestException('市场趋势周期无效');
+    const params: Record<string, string> = { symbol: input.symbol, start_date: input.start,
+      end_date: input.asOf?.slice(0, 10) || input.end, period: input.period };
+    if (input.period === '30m') params.days = '120';
+    if (dowOnly) { params.include_dow = 'true'; params.dow_as_of = input.asOf || input.end; }
+    else if (input.period === '1d') params.include_technical_scores = 'true';
+    const raw = await this.upstream(input.period === '1d' ? '/api/kline/daily' : '/api/kline/period', params);
+    const normalized = normalizeAnalysis(raw, { ...input, asOf: undefined });
+    return { rows: normalized.bars.map(b => ({ date: b.time, close: b.close, is_closed: b.isClosed })),
+      technical_scores: input.period === '1d' && !dowOnly ? raw.technical_scores : undefined,
+      dow: dowOnly ? raw.dow : undefined };
+  }
+  async strongEtfs(page = '1', sort?: string) {
+    if (typeof page !== 'string' || !/^[1-9]\d{0,5}$/.test(page)) throw new BadRequestException('页码无效');
+    if (sort !== undefined && sort !== 'asc' && sort !== 'desc') throw new BadRequestException('排序方向无效');
+    const query = { strong_only: 'true', page, page_size: '20', ...(sort ? { sort_change_pct: sort } : {}) };
+    const data = await this.upstream('/api/kline/etf-pool', query);
+    return {
+      items: list(data.rows).map(row => {
+        const change = number(row.change_pct);
+        return { symbol: row.symbol, name: row.name, assetType: 'etf',
+          price: number(row.last_price), changePercent: change === null ? null : change * 100 };
+      }),
+      total: data.total,
+      date: data.signal_date,
+      warnings: data.signal_warnings ?? [],
+    };
   }
   async radar() {
     return this.upstream('/api/kline/etf-pool/radar');
